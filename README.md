@@ -35,7 +35,7 @@ pwndbg.aglib.symbol → pwndbg.gdblib.symbol → pwndbg.symbol
 ## 下载方法
 
 ```sh
-git clone https://github.com/MindednessKind/rename.git
+git clone https://github.com/liangbo6/rename.git
 ```
 
 或在 Release 中分开下载。
