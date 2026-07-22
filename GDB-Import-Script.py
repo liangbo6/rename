@@ -5,13 +5,12 @@ import subprocess
 import os
 
 try:
-    import pwndbg.gdblib.symbol as symbol
-    import pwndbg.gdblib.proc as proc
-    import pwndbg.gdblib.elf as elf
+    import pwndbg.aglib.symbol as symbol
 except ImportError:
-    import pwndbg.symbol as symbol
-    import pwndbg.proc as proc
-    import pwndbg.elf as elf
+    try:
+        import pwndbg.gdblib.symbol as symbol
+    except ImportError:
+        import pwndbg.symbol as symbol
 
 #用来缓存pie地址与pie是否开启，无需每次都调用命令
 pie_addr : int|None = None
@@ -21,29 +20,29 @@ is_pie_enabled : bool|None = None
 user_symbols = {}
 user_breakpoints = {}
 
-# 保存原始的symbol.get方法
-original_symbol_get = symbol.get
+# 保存原始的 resolve_addr 方法
+original_resolve_addr = symbol.resolve_addr
 
 # 文件路径
 SAVE_FILE = '.rename'
 BREAKPOINT_FILE = '.rename_breakpoints'
 
-# 重新定义获取符号的方法，支持偏移显示
-def renamed_symbol_get(address, *a, **kw):
+# 重新定义解析地址的方法，支持偏移显示
+def renamed_resolve_addr(address, *a, **kw):
     if address in user_symbols:
         name = user_symbols[address]
         if '+' in name:
             function_name, offset = name.split('+')
-            return f"{function_name}+{offset}"  # 显示函数名和偏移
-        return name  # 如果没有偏移，返回原符号名
-    return original_symbol_get(address, *a, **kw)
+            return f"{function_name}+{offset}"
+        return name
+    return original_resolve_addr(address, *a, **kw)
 
 # 安装和卸载符号钩子
 def install_hook():
-    symbol.get = renamed_symbol_get
+    symbol.resolve_addr = renamed_resolve_addr
 
 def uninstall_hook():
-    symbol.get = original_symbol_get
+    symbol.resolve_addr = original_resolve_addr
     user_symbols.clear()
     user_breakpoints.clear()
 
