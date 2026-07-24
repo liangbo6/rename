@@ -24,8 +24,8 @@ user_breakpoints = {}
 original_resolve_addr = symbol.resolve_addr
 
 # 文件路径
-SAVE_FILE = '.rename'
-BREAKPOINT_FILE = '.rename_breakpoints'
+SAVE_FILE = './rename.txt'
+BREAKPOINT_FILE = './rename_breakpoints.txt'
 
 # 重新定义解析地址的方法，支持偏移显示
 def renamed_resolve_addr(address, *a, **kw):
