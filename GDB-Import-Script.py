@@ -12,6 +12,38 @@ except ImportError:
     except ImportError:
         import pwndbg.symbol as symbol
 
+# PIE/进程 API 兼容层
+try:
+    from pwndbg.aglib.proc import binary_base_addr, exe as proc_exe
+    from pwndbg.aglib.elf import get_elf_info
+    _HAS_AGLIB_PROC = True
+except ImportError:
+    _HAS_AGLIB_PROC = False
+
+# 命令注册兼容 pwndbg 2026.02.18+ 的 category 参数
+try:
+    from pwndbg.commands import CommandCategory
+    _HAS_CMD_CATEGORY = True
+except ImportError:
+    _HAS_CMD_CATEGORY = False
+
+if _HAS_CMD_CATEGORY:
+    import inspect
+    def _cmd_reg(func):
+        sig = inspect.signature(func)
+        parser = argparse.ArgumentParser(description=func.__name__.replace("_", " "))
+        for name, param in sig.parameters.items():
+            if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
+                continue
+            if param.default is inspect.Parameter.empty:
+                parser.add_argument(name, type=str, help=name)
+            else:
+                parser.add_argument(name, nargs="?", type=str, default=param.default,
+                                    help=name)
+        return pwndbg.commands.Command(parser, category=CommandCategory.MISC)(func)
+else:
+    _cmd_reg = pwndbg.commands.Command
+
 #用来缓存pie地址与pie是否开启，无需每次都调用命令
 pie_addr : int|None = None
 is_pie_enabled : bool|None = None
@@ -19,6 +51,7 @@ is_pie_enabled : bool|None = None
 # 存储用户的符号和断点
 user_symbols = {}
 user_breakpoints = {}
+user_orig_addrs = {}       # 记录原始文件偏移地址，用于 rename-save
 
 # 保存原始的 resolve_addr 方法
 original_resolve_addr = symbol.resolve_addr
@@ -45,14 +78,24 @@ def uninstall_hook():
     symbol.resolve_addr = original_resolve_addr
     user_symbols.clear()
     user_breakpoints.clear()
+    user_orig_addrs.clear()
 
 # 检查是否为PIE（位置无关执行文件）
 def is_pie():
     global is_pie_enabled
-    if is_pie_enabled != None:
+    if is_pie_enabled is not None:
         return is_pie_enabled
+
+    if _HAS_AGLIB_PROC:
+        try:
+            is_pie_enabled = get_elf_info(proc_exe()).is_pie
+            return is_pie_enabled
+        except Exception:
+            pass
+
     try:
-        result = subprocess.run(['checksec', '--fortify-file', '--pie'], capture_output=True, text=True)
+        result = subprocess.run(['checksec', '--fortify-file', '--pie'],
+                                capture_output=True, text=True)
         if "No PIE" not in result.stdout:
             is_pie_enabled = True
             return True
@@ -64,46 +107,65 @@ def is_pie():
 # 获取PIE基址
 def get_pie_base():
     global pie_addr
-    if is_pie():
-        if pie_addr != None:
-            return pie_addr
+    if not is_pie():
+        return 0
+    if pie_addr is not None:
+        return pie_addr
+
+    if _HAS_AGLIB_PROC:
         try:
-            result = gdb.execute('piebase', to_string=True).strip()
-            if result:
-                import re
-                match = re.search(r'0x[0-9a-fA-F]+', result)
-                if match:
-                    pie_base = match.group(0)
-                    pie_addr = int(pie_base, 16)
-                    return pie_addr
-                else:
-                    print("[!] Error: Unable to extract PIE base address from the output.")
-                    return 0
-            else:
-                print("[!] Error: Unable to retrieve PIE base address.")
-                return 0
-        except gdb.error:
-            print("[!] Error: Unable to retrieve PIE base address.")
-            return 0
+            pie_addr = binary_base_addr()
+            return pie_addr
+        except Exception:
+            pass
+
+    try:
+        result = gdb.execute('piebase', to_string=True).strip()
+        if result:
+            import re
+            match = re.search(r'0x[0-9a-fA-F]+', result)
+            if match:
+                pie_addr = int(match.group(0), 16)
+                return pie_addr
+    except gdb.error:
+        print("[!] Error: Unable to retrieve PIE base address.")
     return 0
 
 # 修复地址（考虑PIE基址）
 def fix_address(addr):
+    if _HAS_AGLIB_PROC:
+        try:
+            base = binary_base_addr()
+            if addr < base:
+                return addr + base
+            return addr
+        except Exception:
+            pass
+
     pie_base = get_pie_base()
     if pie_base:
         if addr >= pie_base:
             return addr
-        else:
-            return addr + pie_base
+        return addr + pie_base
+    return addr
 
 # 获取绝对地址
 def get_absolute_address(addr):
+    if _HAS_AGLIB_PROC:
+        try:
+            base = binary_base_addr()
+            if addr < base:
+                return addr + base
+            return addr
+        except Exception:
+            pass
+
     pie_base = get_pie_base()
     if pie_base:
         if addr >= pie_base:
             return addr
-        else:
-            return addr + pie_base
+        return addr + pie_base
+    return addr
 
 # 解析符号文件并生成符号列表
 def parse_symbol_file(path):
@@ -123,7 +185,7 @@ def parse_symbol_file(path):
     return symbols
 
 # 导入符号并显示带偏移的符号
-@pwndbg.commands.Command
+@_cmd_reg
 def rename_import(file):
     try:
         with open(file, 'r') as f:
@@ -140,26 +202,32 @@ def rename_import(file):
                 #根据parts数量选择分支处理
                 if len(parts) == 2:                             #for addr+name format
                     addr_str, name = parts[0], parts[1]
-                    addr = fix_address(int(addr_str, 0))
+                    orig_addr = int(addr_str, 0)
+                    addr = fix_address(orig_addr)
                     user_symbols[addr] = name
+                    user_orig_addrs[addr] = orig_addr
                     print(f"✓ imported {name} at {addr:#x}")
                 # 设置断点
                 elif len(parts) == 3 and parts[2] == '#bp':     #for addr+name+"#bp" format
                     addr_str, name = parts[0], parts[1]
-                    addr = fix_address(int(addr_str, 0))
+                    orig_addr = int(addr_str, 0)
+                    addr = fix_address(orig_addr)
                     abs_addr = get_absolute_address(addr)
                     gdb.execute(f'b *{hex(abs_addr)}')
                     user_symbols[addr] = name
                     user_breakpoints[addr] = name
+                    user_orig_addrs[addr] = orig_addr
                     print(f'✓ Breakpoint set at {name} (address 0x{abs_addr:x})')
                 elif len(parts) == 3 and parts[2] != '#bp':     #for start_str+end_str+name format
                     start_str, end_str, name = parts[0], parts[1], parts[2]
-                    start = fix_address(int(start_str, 0))
+                    orig_start = int(start_str, 0)
+                    start = fix_address(orig_start)
                     end = fix_address(int(end_str, 0))
                     for a in range(start, end):
                         user_symbols[a] = f"{name}+{a - start}" # 10 进制显示方法
-                        # user_symbols[a] = f"{name}+0x{a - start :x}" # 16进制显示方法
+                        user_orig_addrs[a] = orig_start + (a - start)
                     user_symbols[start] = name
+                    user_orig_addrs[start] = orig_start
                     print(f"✓ imported {name} ({start:#x} - {end:#x})")
                 else:
                     print(f"[!] Invalid line format: {line}")
@@ -167,18 +235,19 @@ def rename_import(file):
         print(f'[!] Failed to import: {e}')
 
 # 保存符号重命名
-@pwndbg.commands.Command
+@_cmd_reg
 def rename_save():
     try:
         with open(SAVE_FILE, 'w') as f:
             for addr, name in user_symbols.items():
-                f.write(f'0x{addr:x} {name}\n')
+                orig = user_orig_addrs.get(addr, addr)
+                f.write(f'0x{orig:x} {name}\n')
         print(f'✓ Saved to {SAVE_FILE}')
     except Exception as e:
         print(f'[!] Failed to save: {e}')
 
 # 加载符号重命名
-@pwndbg.commands.Command
+@_cmd_reg
 def rename_load():
     if not os.path.exists(SAVE_FILE):
         print(f'[!] {SAVE_FILE} not found')
@@ -186,7 +255,7 @@ def rename_load():
     rename_import(SAVE_FILE)
 
 # 显示重命名的符号
-@pwndbg.commands.Command
+@_cmd_reg
 def rename_list():
     if not user_symbols:
         print('No renamed symbols.')
@@ -195,13 +264,14 @@ def rename_list():
         print(f'0x{addr:x}: {name} ({breakpoint_status})')
 
 # 删除符号重命名
-@pwndbg.commands.Command
+@_cmd_reg
 def rename_delete(addr):
     try:
         addr = int(addr, 0)
         addr = fix_address(addr)
         if addr in user_symbols:
             del user_symbols[addr]
+            user_orig_addrs.pop(addr, None)
             if addr in user_breakpoints:
                 gdb.execute(f'clear {user_breakpoints[addr]}')
                 del user_breakpoints[addr]
@@ -212,7 +282,7 @@ def rename_delete(addr):
         print(f'[!] Failed to delete: {e}')
 
 # 卸载钩子
-@pwndbg.commands.Command
+@_cmd_reg
 def rename_uninstall():
     uninstall_hook()
     print('Rename hooks uninstalled.')
