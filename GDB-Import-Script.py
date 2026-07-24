@@ -58,17 +58,16 @@ original_resolve_addr = symbol.resolve_addr
 
 # 文件路径
 SAVE_FILE = './rename.txt'
-BREAKPOINT_FILE = './rename_breakpoints.txt'
 
 # 重新定义解析地址的方法，支持偏移显示
-def renamed_resolve_addr(address, *a, **kw):
+def renamed_resolve_addr(address):
     if address in user_symbols:
         name = user_symbols[address]
         if '+' in name:
             function_name, offset = name.split('+')
             return f"{function_name}+{offset}"
         return name
-    return original_resolve_addr(address, *a, **kw)
+    return original_resolve_addr(address)
 
 # 安装和卸载符号钩子
 def install_hook():
@@ -149,40 +148,8 @@ def fix_address(addr):
         return addr + pie_base
     return addr
 
-# 获取绝对地址
-def get_absolute_address(addr):
-    if _HAS_AGLIB_PROC:
-        try:
-            base = binary_base_addr()
-            if addr < base:
-                return addr + base
-            return addr
-        except Exception:
-            pass
-
-    pie_base = get_pie_base()
-    if pie_base:
-        if addr >= pie_base:
-            return addr
-        return addr + pie_base
-    return addr
-
-# 解析符号文件并生成符号列表
-def parse_symbol_file(path):
-    symbols = []
-    with open(path, 'r') as f:
-        for line in f:
-            if not line.strip() or line.startswith("#"):
-                continue
-            parts = line.strip().split()
-            if len(parts) < 3:
-                continue
-            start = fix_address(int(parts[0], 16))
-            end = fix_address(int(parts[1], 16))
-            name = parts[2]
-            size = end - start
-            symbols.append((name, start, size))
-    return symbols
+# 获取绝对地址（与 fix_address 逻辑一致）
+get_absolute_address = fix_address
 
 # 导入符号并显示带偏移的符号
 @_cmd_reg
@@ -259,6 +226,7 @@ def rename_load():
 def rename_list():
     if not user_symbols:
         print('No renamed symbols.')
+        return
     for addr, name in sorted(user_symbols.items()):
         breakpoint_status = 'with breakpoint' if addr in user_breakpoints else 'no breakpoint'
         print(f'0x{addr:x}: {name} ({breakpoint_status})')
