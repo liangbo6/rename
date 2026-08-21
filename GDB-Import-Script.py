@@ -14,20 +14,28 @@ except ImportError:
 
 # PIE/进程 API 兼容层
 try:
-    from pwndbg.aglib.proc import binary_base_addr, exe as proc_exe
-    from pwndbg.aglib.elf import get_elf_info
+    import pwndbg.aglib.proc as _proc_mod
+    import pwndbg.aglib.elf as _elf_mod
     _HAS_AGLIB_PROC = True
-except ImportError:
+except Exception:
     _HAS_AGLIB_PROC = False
 
-# 命令注册兼容 pwndbg 2026.02.18+ 的 category 参数
-try:
-    from pwndbg.commands import CommandCategory
-    _HAS_CMD_CATEGORY = True
-except ImportError:
-    _HAS_CMD_CATEGORY = False
+def _binary_base_addr():
+    """兼容 pwndbg 2025.02.19 (property) 与 2026.02.18 (function) 两种 API 形态"""
+    attr = _proc_mod.binary_base_addr
+    return attr() if callable(attr) else attr
 
-if _HAS_CMD_CATEGORY:
+def _proc_exe():
+    attr = _proc_mod.exe
+    return attr() if callable(attr) else attr
+
+# 命令注册兼容不同 pwndbg 版本
+# 2025.02.19 及更早: 有 ArgparsedCommand，裸 @Command 装饰器 lex_args 按位置传参
+# 2026.02.18+: ArgparsedCommand 已合并进 Command，需 category 与显式 ArgumentParser
+if hasattr(pwndbg.commands, 'ArgparsedCommand'):
+    _cmd_reg = pwndbg.commands.Command
+else:
+    from pwndbg.commands import CommandCategory
     import inspect
     def _cmd_reg(func):
         sig = inspect.signature(func)
@@ -41,8 +49,6 @@ if _HAS_CMD_CATEGORY:
                 parser.add_argument(name, nargs="?", type=str, default=param.default,
                                     help=name)
         return pwndbg.commands.Command(parser, category=CommandCategory.MISC)(func)
-else:
-    _cmd_reg = pwndbg.commands.Command
 
 #用来缓存pie地址与pie是否开启，无需每次都调用命令
 pie_addr : int|None = None
@@ -87,7 +93,7 @@ def is_pie():
 
     if _HAS_AGLIB_PROC:
         try:
-            is_pie_enabled = get_elf_info(proc_exe()).is_pie
+            is_pie_enabled = _elf_mod.get_elf_info(_proc_exe()).is_pie
             return is_pie_enabled
         except Exception:
             pass
@@ -113,7 +119,7 @@ def get_pie_base():
 
     if _HAS_AGLIB_PROC:
         try:
-            pie_addr = binary_base_addr()
+            pie_addr = _binary_base_addr()
             return pie_addr
         except Exception:
             pass
@@ -134,7 +140,7 @@ def get_pie_base():
 def fix_address(addr):
     if _HAS_AGLIB_PROC:
         try:
-            base = binary_base_addr()
+            base = _binary_base_addr()
             if addr < base:
                 return addr + base
             return addr
